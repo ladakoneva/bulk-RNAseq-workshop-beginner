@@ -1,0 +1,189 @@
+---
+title: "QC Exploration"
+author: ""
+date: "2026-06-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+```{r install-packages, include=FALSE}
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("DESeq2")
+
+
+```
+
+# 1. Setup
+
+This notebook performs initial QC and exploratory analysis for bulk RNA-seq data.
+
+```{r load-packages}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(dplyr)
+library(tibble)
+```
+
+# 2. Load data
+
+```{r load-data}
+count_data <- read.delim("data/E-GEOD-52194-raw-counts.tsv",
+                         stringsAsFactors = FALSE,
+                         check.names = FALSE)
+
+count_data %>%
+  slice_head(n = 5)
+```
+
+# 3. Load sample metadata
+
+```{r load-metadata}
+sample_metadata <- read.delim("data/E-GEOD-52194-experiment-design.tsv",
+                              stringsAsFactors = FALSE,
+                              check.names = FALSE)
+
+sample_metadata %>%
+  slice_head(n = 6)
+```
+
+# 4. Create sample information
+
+```{r sample-info}
+sample_info <- sample_metadata %>%
+  select(
+    sample_id = Run,
+    clinical_info = `Sample Characteristic[clinical information]`,
+    disease = `Sample Characteristic[disease]`,
+    individual = `Sample Characteristic[individual]`,
+    sex = `Sample Characteristic[sex]`,
+    analysed = Analysed
+  ) %>%
+  mutate(
+    clinical_info = factor(clinical_info),
+    disease = factor(disease),
+    sex = factor(sex),
+    analysed = factor(analysed)
+  ) %>%
+  column_to_rownames("sample_id")
+
+sample_info
+```
+
+```{r sample-info-upd}
+# remove not analysed sample 
+sample_info <- sample_info[sample_info$analysed == 'Yes', ]
+
+# reorder 
+sample_info <- sample_info[match(colnames(count_mat), rownames(sample_info)), , drop = FALSE]
+stopifnot(identical(rownames(sample_info), colnames(count_mat)))
+
+# create column group
+sample_info <- sample_info %>%
+  mutate(
+    group = case_when(
+      clinical_info == "non-triple-negative breast cancer" ~ "non_triple_neg",
+      clinical_info == "HER2 Positive Breast Carcinoma" ~ "her2_pos",
+      clinical_info == "triple-negative breast cancer" ~ "triple_neg",
+      clinical_info == "normal" ~ "normal",
+      TRUE ~ clinical_info
+    ),
+    group = factor(group, levels = c("normal", "triple_neg", "non_triple_neg", "her2_pos"))
+  )
+
+sample_info
+
+```
+
+# 5. Metadata summary
+
+```{r metadata-summary}
+summary(sample_info)
+
+sample_info %>%
+  as_tibble(rownames = "sample_id") %>%
+  count(clinical_info, name = "n_samples") %>%
+  arrange(desc(n_samples))
+```
+
+# 6. Data inspection
+
+```{r counts-matrix}
+count_mat <- as.matrix(count_data[, -(1:2)])
+rownames(count_mat) <- count_data$`Gene ID`
+
+# inspect dimensions and a few rows
+cat("Count matrix dimensions:", dim(count_mat), "\n")
+head(count_mat[, 1:6])
+```
+
+# 5. Summarise library sizes
+
+```{r library-sizes}
+library_sizes <- colSums(count_mat)
+summary(library_sizes)
+
+library_size_df <- tibble(
+  sample_id = names(library_sizes),
+  total_counts = library_sizes
+)
+
+ggplot(library_size_df, aes(x = sample_id, y = total_counts)) +
+  geom_col(fill = "steelblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Total counts per sample",
+       x = "Sample",
+       y = "Total counts")
+```
+
+# 6. Create DESeq2 dataset
+
+```{r deseq-dataset}
+dds <- DESeqDataSetFromMatrix(
+  countData = count_mat,
+  colData = sample_info,
+  design = ~ group
+)
+
+dds <- dds[rowSums(counts(dds)) > 1, ]
+dds
+```
+
+# 7. Transformations and exploratory plots
+
+```{r vst-transformation}
+vsd <- vst(dds, blind = FALSE)
+
+plotCounts(dds, gene = rownames(dds)[1], intgroup = "group")
+```
+
+# 8. PCA plot coloured by group
+
+```{r pca-plot}
+plotPCA(vsd, intgroup = "group") +
+  coord_fixed() +
+  labs(title = "PCA of VST-transformed counts",
+       color = "Group")
+```
+
+# 9. Sample distance heatmap
+
+```{r sample-distance-heatmap}
+sample_dists <- dist(t(assay(vsd)))
+sample_dist_mat <- as.matrix(sample_dists)
+rownames(sample_dist_mat) <- colnames(sample_dist_mat) <- colnames(vsd)
+
+pheatmap(sample_dist_mat,
+         clustering_distance_rows = sample_dists,
+         clustering_distance_cols = sample_dists,
+         main = "Sample distance heatmap",
+         color = colorRampPalette(c("navy", "white", "firebrick3"))(50))
+```
